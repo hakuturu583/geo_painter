@@ -1,0 +1,24 @@
+# お台場エリアの CityGML → PLY 変換設定
+#
+# お台場（台場・有明・青海）エリアの中心付近を参照点として設定します。
+# source: plateau に設定することで、キャッシュがなければ自動ダウンロードします。
+#
+# plateau の dataset_ids / file_types / download は conf/plateau/odaiba.yaml から
+# Hydra の defaults list で自動 include されます（重複定義不要）。
+
+defaults:
+  - /plateau@plateau: odaiba  # conf/plateau/odaiba.yaml を convert.plateau に展開
+
+# 入力ソース: plateau を指定するとキャッシュ確認 → 必要時ダウンロードを行う
+source: plateau
+
+# 入力ディレクトリ（ダウンロードキャッシュの保存先）
+input_dir: ./data
+
+# 出力 PLY ファイルパス
+output_path: ./output/odaiba.ply
+
+# 座標変換の参照点（お台場中心付近）
+origin:
+  lat: 35.6295   # お台場中心付近（緯度）
+  lon: 139.7754  # お台場中心付近（経度）

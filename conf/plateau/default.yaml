@@ -13,3 +13,8 @@ dataset_ids: []
 #   - "MVT"       : MVT（Mapbox Vector Tiles）形式のみ
 file_types:
   - CityGML
+
+# HTTP 通信パラメータ（citygml-to-ply の source: plateau でも参照される）
+download:
+  chunk_size: 8192
+  timeout: 60

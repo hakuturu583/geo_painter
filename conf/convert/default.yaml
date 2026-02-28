@@ -1,0 +1,59 @@
+# CityGML → PLY 変換のデフォルト設定
+#
+# origin は必須フィールド（???）のため、このデフォルト設定のみで実行すると
+# Hydra の MissingMandatoryValue エラーが発生します。
+# 必ず convert=<preset> でプリセットを指定してください。
+#
+# 例:
+#   uv run citygml-to-ply convert=odaiba
+#   uv run citygml-to-ply convert.origin.lat=35.63 convert.origin.lon=139.77
+
+# 入力ソース種別
+#   file    : input_dir 直下の *.zip を直接読む（デフォルト）
+#   plateau : input_dir/**/*.zip をキャッシュとして確認し、
+#             未ダウンロードの場合は plateau 設定に従って自動ダウンロード
+source: file
+
+# 変換対象の地物種別
+feature_types:
+  - building
+  - road
+  - terrain
+
+# 入力ディレクトリ
+#   source: file    → ここの *.zip を直接読む
+#   source: plateau → ダウンロードキャッシュの保存先（plateau-download と同じ場所）
+input_dir: ./data
+
+# 出力 PLY ファイルパス
+output_path: ./output/scene.ply
+
+# 座標変換の参照点（ローカルENU座標の原点）
+# ??? は Hydra の必須フィールド（未設定の場合エラー）
+origin:
+  lat: ???
+  lon: ???
+
+# LOD 優先順位（上位から順に試す）
+lod:
+  building:
+    - 3
+    - 2
+    - 1
+    - 0
+  road:
+    - 2
+    - 1
+  terrain:
+    - tin
+
+# source: plateau のときに使用するダウンロード設定
+# dataset_ids / file_types / download の実値は各プリセットの defaults list で
+# conf/plateau/<preset>.yaml から include される。ここはスキーマ定義のみ。
+plateau:
+  dataset_ids: []
+  file_types:
+    - CityGML
+  download:
+    chunk_size: 8192
+    timeout: 60
