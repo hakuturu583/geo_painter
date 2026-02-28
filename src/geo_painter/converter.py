@@ -200,10 +200,13 @@ class CityGmlToPlyConverter:
             logger.info("%d 個のデータセットをダウンロードします", len(missing))
             self._download_datasets(missing, input_dir, cfg)
 
-        # ダウンロード後に再度 ZIP を収集（input_dir/**/*.zip）
-        zip_files = self._pick_latest_zip_versions(list(input_dir.glob("**/*.zip")))
+        # ダウンロード後に再度 ZIP を収集（設定された dataset_ids のディレクトリのみ）
+        all_zips: list[Path] = []
+        for dataset_id in dataset_ids:
+            all_zips.extend((input_dir / dataset_id).glob("*.zip"))
+        zip_files = self._pick_latest_zip_versions(all_zips)
         logger.info(
-            "source=plateau: %d 個の ZIP を検出 (%s/**)", len(zip_files), input_dir
+            "source=plateau: %d 個の ZIP を検出 (%d データセット)", len(zip_files), len(dataset_ids)
         )
         return zip_files
 
