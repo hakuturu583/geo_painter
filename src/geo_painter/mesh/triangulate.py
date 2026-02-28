@@ -72,6 +72,22 @@ def triangulate_geometry(
     return vertices, faces
 
 
+def triangulate_polygon(
+    exterior: np.ndarray,
+    interiors: list[np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """1つのポリゴンを三角分割する（公開API）
+
+    Args:
+        exterior: 外輪座標 shape=(N, 3)
+        interiors: 内輪座標リスト
+
+    Returns:
+        (vertices, faces) のタプル
+    """
+    return _triangulate_polygon(exterior, interiors)
+
+
 def _triangulate_polygon(
     exterior: np.ndarray,
     interiors: list[np.ndarray],

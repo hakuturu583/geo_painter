@@ -6,7 +6,10 @@ Scanner → Parser → Transformer → Triangulate → PLY書き出しの
 
 from __future__ import annotations
 
+import io
 import logging
+import posixpath
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -14,14 +17,22 @@ from omegaconf import DictConfig, OmegaConf
 from plyfile import PlyData, PlyElement
 from tqdm import tqdm
 
-from geo_painter.citygml.models import FeatureType, Geometry
+from geo_painter.citygml.models import FeatureType, GmlPolygon
 from geo_painter.citygml.parser import CityGMLParser, CityGMLScanner
 from geo_painter.mesh.transform import CoordinateTransformer
-from geo_painter.mesh.triangulate import triangulate_geometry
+from geo_painter.mesh.triangulate import triangulate_polygon
 from geo_painter.plateau import PlateauDownloader
 from geo_painter.plateau.downloader import _extract_version, _VERSION_RE
 
 logger = logging.getLogger(__name__)
+
+# Pillow は optional（未インストール時はテクスチャベイクを無効化）
+try:
+    from PIL import Image as _PILImage
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_AVAILABLE = False
+    logger.warning("Pillow が未インストールです。テクスチャベイクは無効になります。")
 
 
 class CityGmlToPlyConverter:
@@ -153,6 +164,9 @@ class CityGmlToPlyConverter:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """ZIP ファイル群からジオメトリを収集して結合する
 
+        テクスチャ情報が付いているポリゴンはテクスチャを頂点色にベイクする。
+        テクスチャがないポリゴンは地物種別の固定色を使用する。
+
         Args:
             zip_files: 処理対象の ZIP ファイルリスト
             target_types: 処理対象の地物種別
@@ -172,18 +186,23 @@ class CityGmlToPlyConverter:
             logger.info("ZIP 処理中: %s", zip_path.name)
             scanner = CityGMLScanner(zip_path)
 
+            # ZIP単位でテクスチャキャッシュを保持
+            tex_cache: dict[str, object] = {}
+
             gml_files = [
-                (ft, s)
-                for ft, s in scanner.iter_files()
+                (ft, s, name)
+                for ft, s, name in scanner.iter_files()
                 if ft in target_types
             ]
-            for feature_type, stream in tqdm(
+            for feature_type, stream, gml_entry in tqdm(
                 gml_files,
                 desc=zip_path.name,
                 unit="gml",
                 leave=False,
             ):
+                gml_dir = posixpath.dirname(gml_entry)
                 geometries = parser.parse(stream, feature_type)
+                fallback_color = np.array(feature_type.color, dtype=np.uint8)
 
                 for geom in tqdm(
                     geometries,
@@ -191,17 +210,23 @@ class CityGmlToPlyConverter:
                     unit="geom",
                     leave=False,
                 ):
-                    verts, faces = triangulate_geometry(geom, transformer)
-                    if len(faces) == 0:
-                        continue
+                    for polygon in geom.polygons:
+                        ext_enu = transformer.transform_ring(polygon.exterior)
+                        int_enus = [
+                            transformer.transform_ring(r) for r in polygon.interiors
+                        ]
+                        verts, faces = triangulate_polygon(ext_enu, int_enus)
+                        if len(faces) == 0:
+                            continue
 
-                    color = np.array(feature_type.color, dtype=np.uint8)
-                    colors = np.tile(color, (len(verts), 1))
+                        colors = self._resolve_colors(
+                            polygon, verts, fallback_color, zip_path, gml_dir, tex_cache
+                        )
 
-                    all_vertices.append(verts)
-                    all_faces.append(faces + vertex_offset)
-                    all_colors.append(colors)
-                    vertex_offset += len(verts)
+                        all_vertices.append(verts)
+                        all_faces.append(faces + vertex_offset)
+                        all_colors.append(colors)
+                        vertex_offset += len(verts)
 
         if not all_vertices:
             logger.warning("変換できるジオメトリがありませんでした")
@@ -216,6 +241,46 @@ class CityGmlToPlyConverter:
             np.concatenate(all_faces, axis=0),
             np.concatenate(all_colors, axis=0),
         )
+
+    @staticmethod
+    def _resolve_colors(
+        polygon: GmlPolygon,
+        verts: np.ndarray,
+        fallback_color: np.ndarray,
+        zip_path: Path,
+        gml_dir: str,
+        tex_cache: dict[str, object],
+    ) -> np.ndarray:
+        """ポリゴンの頂点色を決定する
+
+        テクスチャがあればベイク、なければ固定色を返す。
+
+        Args:
+            polygon: 処理対象のポリゴン
+            verts: 三角分割済み頂点 shape=(V, 3)
+            fallback_color: テクスチャなし時の固定色 shape=(3,)
+            zip_path: ZIPファイルのパス（テクスチャ読み込み用）
+            gml_dir: GMLファイルのZIP内ディレクトリ
+            tex_cache: テクスチャ画像キャッシュ
+
+        Returns:
+            頂点色配列 shape=(V, 3) uint8
+        """
+        if (
+            _PIL_AVAILABLE
+            and polygon.texture_uri is not None
+            and polygon.exterior.uv is not None
+        ):
+            tex_entry = posixpath.normpath(
+                posixpath.join(gml_dir, polygon.texture_uri)
+            )
+            img = _load_texture(zip_path, tex_entry, tex_cache)
+            if img is not None:
+                uvs = _build_polygon_uvs(polygon)
+                if len(uvs) == len(verts):
+                    return _sample_texture_colors(img, uvs)
+
+        return np.tile(fallback_color, (len(verts), 1))
 
     def _resolve_file_zips(self, input_dir: Path) -> list[Path]:
         """source=file のとき input_dir 直下の *.zip を返す"""
@@ -350,3 +415,80 @@ class CityGmlToPlyConverter:
             comments=comments,
         )
         ply.write(str(output_path))
+
+
+# ---------------------------------------------------------------------------
+# テクスチャベイク ヘルパー関数
+# ---------------------------------------------------------------------------
+
+def _load_texture(
+    zip_path: Path,
+    tex_entry: str,
+    cache: dict[str, object],
+) -> object:
+    """ZIP内のテクスチャ画像を読み込んでキャッシュする
+
+    Args:
+        zip_path: ZIPファイルのパス
+        tex_entry: ZIP内のテクスチャファイルパス
+        cache: キャッシュ辞書（None エントリは「存在しない」を示す）
+
+    Returns:
+        PIL.Image.Image または None
+    """
+    if tex_entry in cache:
+        return cache[tex_entry]
+
+    img = None
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            with zf.open(tex_entry) as f:
+                img = _PILImage.open(io.BytesIO(f.read())).convert("RGB")
+    except (KeyError, Exception) as exc:
+        logger.debug("テクスチャ読み込み失敗 [%s]: %s", tex_entry, exc)
+
+    cache[tex_entry] = img
+    return img
+
+
+def _build_polygon_uvs(polygon: GmlPolygon) -> np.ndarray:
+    """earcut と同じ頂点順（exterior → interiors）でUVを結合する
+
+    Args:
+        polygon: UV付きポリゴン（exterior.uv は None でないことを前提）
+
+    Returns:
+        UV配列 shape=(V, 2) float32
+    """
+    parts: list[np.ndarray] = [polygon.exterior.uv]  # type: ignore[list-item]
+    for interior in polygon.interiors:
+        if interior.uv is not None:
+            parts.append(interior.uv)
+        else:
+            parts.append(np.zeros((len(interior.coords), 2), dtype=np.float32))
+    return np.concatenate(parts, axis=0)
+
+
+def _sample_texture_colors(img: object, uvs: np.ndarray) -> np.ndarray:
+    """UV座標でテクスチャをサンプリングして頂点色を返す（nearest neighbor）
+
+    CityGML の textureCoordinates は (u, v) で v=0 が画像下端。
+    PIL 配列は y=0 が上端なので v を反転する。
+
+    Args:
+        img: PIL.Image.Image (RGB)
+        uvs: UV座標 shape=(V, 2) float32、値域 [0, 1]
+
+    Returns:
+        頂点色 shape=(V, 3) uint8
+    """
+    w, h = img.size  # type: ignore[union-attr]
+    arr = np.array(img)  # (H, W, 3) uint8
+
+    u = np.clip(uvs[:, 0], 0.0, 1.0)
+    v = np.clip(uvs[:, 1], 0.0, 1.0)
+
+    px = np.clip((u * (w - 1)).astype(np.int32), 0, w - 1)
+    py = np.clip(((1.0 - v) * (h - 1)).astype(np.int32), 0, h - 1)
+
+    return arr[py, px].astype(np.uint8)  # (V, 3)

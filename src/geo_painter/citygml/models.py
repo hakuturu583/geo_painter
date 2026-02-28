@@ -44,9 +44,11 @@ class Ring:
     Attributes:
         coords: 頂点座標配列 shape=(N, 3)、各列は (lat, lon, height)
                 末尾の重複点（閉合点）は除去済み
+        uv: テクスチャUV座標 shape=(N, 2)、テクスチャなしの場合は None
     """
 
     coords: np.ndarray  # shape (N, 3), dtype float64
+    uv: np.ndarray | None = None  # shape (N, 2), dtype float32
 
 
 @dataclass
@@ -56,10 +58,12 @@ class GmlPolygon:
     Attributes:
         exterior: 外輪リング
         interiors: 内輪リングのリスト（穴）
+        texture_uri: テクスチャ画像の相対URI（テクスチャなしの場合は None）
     """
 
     exterior: Ring
     interiors: list[Ring] = field(default_factory=list)
+    texture_uri: str | None = None
 
 
 @dataclass
