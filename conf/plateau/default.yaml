@@ -1,0 +1,15 @@
+# PLATEAUダウンロード設定のデフォルト値
+# dataset_ids と file_types をオーバーライドして使用する
+
+# G空間情報センター上のデータセットID一覧
+# 形式: plateau-{市区町村コード}-{名前}-{年度}
+dataset_ids: []
+
+# ダウンロードするファイル種別
+# 空リスト [] の場合は全リソースをダウンロード
+# 指定例:
+#   - "CityGML"   : CityGML形式のみ
+#   - "3D Tiles"  : 3D Tiles形式のみ
+#   - "MVT"       : MVT（Mapbox Vector Tiles）形式のみ
+file_types:
+  - CityGML

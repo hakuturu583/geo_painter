@@ -1,0 +1,19 @@
+# お台場エリアの PLATEAU 設定
+#
+# お台場（台場・有明・青海）は港区と江東区にまたがるため、
+# 両区のデータセットを含めています。
+#
+# データセットの詳細:
+#   港区  (東京都 市区町村コード: 13103)
+#     https://www.geospatial.jp/ckan/dataset/plateau-13103-minato-ku-2023
+#   江東区 (東京都 市区町村コード: 13108)
+#     https://www.geospatial.jp/ckan/dataset/plateau-13108-koto-ku-2023
+
+dataset_ids:
+  - plateau-13103-minato-ku-2023   # 港区（台場を含む）
+  - plateau-13108-koto-ku-2023     # 江東区（有明・青海を含む）
+
+# ダウンロードするファイル種別
+# 空リスト [] の場合は全リソースをダウンロード
+file_types:
+  - CityGML

@@ -1,0 +1,12 @@
+defaults:
+  - plateau: odaiba   # デフォルトはお台場設定
+  - _self_
+
+# ダウンロード先のベースディレクトリ
+output:
+  base_dir: ./data
+
+# HTTP通信パラメータ
+download:
+  chunk_size: 8192      # 1チャンクのバイト数
+  timeout: 60           # リクエストタイムアウト（秒）
