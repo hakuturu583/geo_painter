@@ -1,45 +1,40 @@
-#!/usr/bin/env python3
-"""PLATEAUデータダウンロードスクリプト
+"""PLATEAUデータダウンロードCLI
 
 使い方:
     # デフォルト設定（お台場）でダウンロード
-    python scripts/download_plateau.py
+    uv run plateau-download
 
     # リソース一覧だけ確認（ダウンロードしない）
-    python scripts/download_plateau.py +info=true
+    uv run plateau-download +info=true
 
     # 別のプリセットに切り替え（conf/plateau/ に追加したもの）
-    python scripts/download_plateau.py plateau=odaiba
+    uv run plateau-download plateau=odaiba
 
     # 設定値を上書き
-    python scripts/download_plateau.py output.base_dir=/tmp/plateau
+    uv run plateau-download output.base_dir=/tmp/plateau
 
     # データセットIDを直接指定
-    python scripts/download_plateau.py \\
+    uv run plateau-download \\
         'plateau.dataset_ids=[plateau-13113-shibuya-ku-2023]' \\
         'plateau.file_types=[CityGML]'
 
     # 全ファイル種別をダウンロード（CityGML以外も含む）
-    python scripts/download_plateau.py 'plateau.file_types=[]'
+    uv run plateau-download 'plateau.file_types=[]'
 """
 
 import logging
-import sys
 from pathlib import Path
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-# confディレクトリをパッケージルート基準で解決するため sys.path を調整
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 from geo_painter.plateau import PlateauDownloader
 
-# Hydraのconfig_pathはこのスクリプトからの相対パス
-CONFIG_DIR = str(Path(__file__).parent.parent / "conf")
+# editableインストール前提で conf/ をパッケージルートから解決
+_CONF_DIR = str(Path(__file__).parents[3] / "conf")
 
 
-@hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config")
+@hydra.main(version_base=None, config_path=_CONF_DIR, config_name="config")
 def main(cfg: DictConfig) -> None:
     logging.basicConfig(
         level=logging.INFO,

@@ -18,6 +18,9 @@ dependencies = [
     "gsplat==1.5.3",
 ]
 
+[project.scripts]
+plateau-download = "geo_painter.cli.download_plateau:main"
+
 [build-system]
 requires = ["uv_build>=0.9.7,<0.10.0"]
 build-backend = "uv_build"
