@@ -19,6 +19,7 @@ from geo_painter.citygml.parser import CityGMLParser, CityGMLScanner
 from geo_painter.mesh.transform import CoordinateTransformer
 from geo_painter.mesh.triangulate import triangulate_geometry
 from geo_painter.plateau import PlateauDownloader
+from geo_painter.plateau.downloader import _extract_version, _VERSION_RE
 
 logger = logging.getLogger(__name__)
 
@@ -83,22 +84,29 @@ class CityGmlToPlyConverter:
 
         parser = CityGMLParser()
 
-        for zip_path in zip_files:
+        for zip_path in tqdm(zip_files, desc="ZIP処理", unit="zip"):
             logger.info("ZIP 処理中: %s", zip_path.name)
             scanner = CityGMLScanner(zip_path)
 
-            gml_files = list(scanner.iter_files())
+            gml_files = [
+                (ft, s)
+                for ft, s in scanner.iter_files()
+                if ft in target_types
+            ]
             for feature_type, stream in tqdm(
                 gml_files,
                 desc=zip_path.name,
                 unit="gml",
+                leave=False,
             ):
-                if feature_type not in target_types:
-                    continue
-
                 geometries = parser.parse(stream, feature_type)
 
-                for geom in geometries:
+                for geom in tqdm(
+                    geometries,
+                    desc=f"  {feature_type.value}",
+                    unit="geom",
+                    leave=False,
+                ):
                     verts, faces = triangulate_geometry(geom, transformer)
                     if len(faces) == 0:
                         continue
@@ -149,7 +157,7 @@ class CityGmlToPlyConverter:
         """
         if source == "file":
             # input_dir 直下の *.zip を直接使う
-            zip_files = sorted(input_dir.glob("*.zip"))
+            zip_files = self._pick_latest_zip_versions(sorted(input_dir.glob("*.zip")))
             logger.info("source=file: %d 個の ZIP を検出 (%s)", len(zip_files), input_dir)
             return zip_files
 
@@ -193,7 +201,7 @@ class CityGmlToPlyConverter:
             self._download_datasets(missing, input_dir, cfg)
 
         # ダウンロード後に再度 ZIP を収集（input_dir/**/*.zip）
-        zip_files = sorted(input_dir.glob("**/*.zip"))
+        zip_files = self._pick_latest_zip_versions(list(input_dir.glob("**/*.zip")))
         logger.info(
             "source=plateau: %d 個の ZIP を検出 (%s/**)", len(zip_files), input_dir
         )
@@ -238,6 +246,34 @@ class CityGmlToPlyConverter:
         results = downloader.run()
         total = sum(len(paths) for paths in results.values())
         logger.info("ダウンロード完了: 合計 %d ファイル", total)
+
+    @staticmethod
+    def _pick_latest_zip_versions(zip_files: list[Path]) -> list[Path]:
+        """ZIPファイル名の ``（vN）`` 表記で最新バージョンのみに絞り込む。
+
+        同一グループ（バージョン表記を除いたファイル名が同じ）内で最大バージョン
+        番号のファイルだけを残す。バージョン表記のないファイルはそのまま保持する。
+        """
+        groups: dict[str, list[Path]] = {}
+        for p in zip_files:
+            key = _VERSION_RE.sub("", p.stem).strip()
+            groups.setdefault(key, []).append(p)
+
+        result: list[Path] = []
+        for group in groups.values():
+            if len(group) == 1:
+                result.append(group[0])
+            else:
+                latest = max(group, key=lambda p: _extract_version(p.stem))
+                for p in group:
+                    if p is not latest:
+                        logger.info(
+                            "旧バージョンZIPをスキップ: %s（最新: %s）",
+                            p.name,
+                            latest.name,
+                        )
+                result.append(latest)
+        return sorted(result)
 
     @staticmethod
     def _write_ply(

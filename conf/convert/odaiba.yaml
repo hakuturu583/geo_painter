@@ -7,6 +7,7 @@
 # Hydra の defaults list で自動 include されます（重複定義不要）。
 
 defaults:
+  - default                    # convert/default.yaml を基底として継承
   - /plateau@plateau: odaiba  # conf/plateau/odaiba.yaml を convert.plateau に展開
 
 # 入力ソース: plateau を指定するとキャッシュ確認 → 必要時ダウンロードを行う

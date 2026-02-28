@@ -7,6 +7,7 @@ PLATEAU 3D都市モデルをダウンロードするモジュール。
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,46 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 CKAN_BASE_URL = "https://www.geospatial.jp/ckan/api/3/action"
+
+# バージョン表記のパターン: （v4）/ (v4) など
+_VERSION_RE = re.compile(r"\s*[（(]v(\d+)[）)]\s*")
+
+
+def _extract_version(name: str) -> int:
+    """名前文字列から `（vN）` 形式のバージョン番号を抽出する。未検出は 0。"""
+    m = _VERSION_RE.search(name)
+    return int(m.group(1)) if m else 0
+
+
+def pick_latest_versions(
+    resources: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """同種別リソースに複数バージョンがある場合、最新バージョンのみ返す。
+
+    ``（vN）`` / ``(vN)`` を除去した名前でグループ化し、同一グループ内で
+    最大バージョン番号のリソースのみを残す。バージョン表記のないリソースは
+    単独グループとしてそのまま保持する。
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in resources:
+        key = _VERSION_RE.sub("", r.get("name", "")).strip()
+        groups.setdefault(key, []).append(r)
+
+    result: list[dict[str, Any]] = []
+    for group in groups.values():
+        if len(group) == 1:
+            result.append(group[0])
+        else:
+            latest = max(group, key=lambda r: _extract_version(r.get("name", "")))
+            for r in group:
+                if r is not latest:
+                    logger.info(
+                        "旧バージョンをスキップ: %s（最新: %s）",
+                        r.get("name", "?"),
+                        latest.get("name", "?"),
+                    )
+            result.append(latest)
+    return result
 
 
 class PlateauDownloader:
@@ -74,15 +115,16 @@ class PlateauDownloader:
             絞り込まれたリソースのリスト
         """
         if not file_types:
-            return resources
+            return pick_latest_versions(resources)
 
         lower_types = {ft.lower() for ft in file_types}
-        return [
+        filtered = [
             r
             for r in resources
             if any(ft in r.get("name", "").lower() for ft in lower_types)
             or r.get("format", "").lower() in lower_types
         ]
+        return pick_latest_versions(filtered)
 
     def download_resource(
         self,

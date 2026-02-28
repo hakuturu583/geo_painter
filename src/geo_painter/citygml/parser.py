@@ -6,6 +6,7 @@ CityGMLParser:  lxmlを使ってGMLファイルを解析し Geometry リスト�
 
 from __future__ import annotations
 
+import io
 import logging
 import zipfile
 from pathlib import Path
@@ -72,7 +73,8 @@ class CityGMLScanner:
                     continue
                 logger.debug("GML ファイルを処理: %s", name)
                 with zf.open(name) as f:
-                    yield feature_type, f
+                    data = io.BytesIO(f.read())
+                yield feature_type, data
 
     @staticmethod
     def _classify(zip_entry: str) -> FeatureType | None:
