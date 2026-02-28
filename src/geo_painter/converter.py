@@ -254,9 +254,10 @@ class CityGmlToPlyConverter:
         同一グループ（バージョン表記を除いたファイル名が同じ）内で最大バージョン
         番号のファイルだけを残す。バージョン表記のないファイルはそのまま保持する。
         """
-        groups: dict[str, list[Path]] = {}
+        groups: dict[tuple[Path, str], list[Path]] = {}
         for p in zip_files:
-            key = _VERSION_RE.sub("", p.stem).strip()
+            # 親ディレクトリ単位でグループ化（異なるデータセットの同名ZIPを混在させない）
+            key = (p.parent, _VERSION_RE.sub("", p.stem).strip())
             groups.setdefault(key, []).append(p)
 
         result: list[Path] = []
