@@ -40,9 +40,10 @@ def main(cfg: DictConfig) -> None:
     logger.info("設定:\n%s", OmegaConf.to_yaml(cfg))
 
     converter = CityGmlToPlyConverter(cfg)
-    output_path = converter.run()
+    output_paths = converter.run()
 
-    logger.info("完了: %s", output_path)
+    for path in output_paths:
+        logger.info("完了: %s", path)
 
 
 if __name__ == "__main__":

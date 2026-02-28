@@ -34,29 +34,22 @@ class CityGmlToPlyConverter:
     def __init__(self, cfg: DictConfig) -> None:
         self._cfg = cfg
 
-    def run(self) -> Path:
+    def run(self) -> list[Path]:
         """変換パイプラインを実行してPLYファイルを書き出す
 
+        source=plateau の場合はデータセットごとに1ファイル出力する。
+        出力先ディレクトリは output_path の親ディレクトリ。
+
         Returns:
-            出力PLYファイルのパス
+            出力PLYファイルのパスリスト
         """
         cfg = self._cfg
-
-        # ソース種別に応じてZIPファイルを解決
         input_dir = Path(cfg.convert.input_dir)
         source = cfg.convert.get("source", "file")
-        zip_files = self._resolve_zip_files(input_dir, source, cfg)
-
-        if not zip_files:
-            raise FileNotFoundError(f"ZIPファイルが見つかりません: {input_dir}")
-
-        logger.info("%d 個の ZIP ファイルを処理します", len(zip_files))
-
-        # 出力ディレクトリを作成
         output_path = Path(cfg.convert.output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 処理対象の地物種別を設定から取得
+        # 処理対象の地物種別
         target_types: set[FeatureType] = set()
         for ft_name in cfg.convert.feature_types:
             try:
@@ -76,7 +69,98 @@ class CityGmlToPlyConverter:
             transformer = CoordinateTransformer()
             logger.info("原点は最初の頂点から自動設定されます")
 
-        # 全頂点・全面・全色を蓄積
+        if source == "plateau":
+            return self._run_plateau(input_dir, output_path, cfg, target_types, transformer)
+
+        # source == "file": 単一 PLY に統合
+        zip_files = self._resolve_file_zips(input_dir)
+        if not zip_files:
+            raise FileNotFoundError(f"ZIPファイルが見つかりません: {input_dir}")
+        logger.info("%d 個の ZIP ファイルを処理します", len(zip_files))
+
+        vertices, faces, colors = self._collect_geometry(zip_files, target_types, transformer)
+        self._write_ply(output_path, vertices, faces, colors, transformer)
+        logger.info("PLY 出力完了: %s", output_path)
+        return [output_path]
+
+    def _run_plateau(
+        self,
+        input_dir: Path,
+        output_path: Path,
+        cfg: DictConfig,
+        target_types: set[FeatureType],
+        transformer: CoordinateTransformer,
+    ) -> list[Path]:
+        """source=plateau のときにデータセットごとに PLY を書き出す
+
+        出力先は output_path の親ディレクトリ。
+        ファイル名は {dataset_id}.ply。
+
+        Args:
+            input_dir: ダウンロードキャッシュのベースディレクトリ
+            output_path: 出力先（親ディレクトリを出力ディレクトリとして使用）
+            cfg: Hydra 設定
+            target_types: 処理対象の地物種別
+            transformer: 座標変換器
+
+        Returns:
+            出力された PLY ファイルパスのリスト
+        """
+        plateau_cfg = cfg.convert.plateau
+        dataset_ids: list[str] = list(plateau_cfg.dataset_ids)
+        output_dir = output_path.parent
+
+        # 未キャッシュのデータセットをダウンロード
+        missing: list[str] = []
+        for dataset_id in dataset_ids:
+            dataset_dir = input_dir / dataset_id
+            cached = list(dataset_dir.glob("*.zip")) if dataset_dir.exists() else []
+            if cached:
+                logger.info("キャッシュ確認 OK [%s]: %d 個の ZIP", dataset_id, len(cached))
+            else:
+                logger.info("キャッシュなし [%s]: ダウンロードが必要", dataset_id)
+                missing.append(dataset_id)
+
+        if missing:
+            logger.info("%d 個のデータセットをダウンロードします", len(missing))
+            self._download_datasets(missing, input_dir, cfg)
+
+        # データセットごとに PLY を生成
+        results: list[Path] = []
+        for dataset_id in tqdm(dataset_ids, desc="データセット処理", unit="dataset"):
+            zip_files = self._pick_latest_zip_versions(
+                list((input_dir / dataset_id).glob("*.zip"))
+            )
+            if not zip_files:
+                logger.warning("ZIPが見つかりません: %s", dataset_id)
+                continue
+
+            logger.info("[%s] %d 個の ZIP ファイルを処理します", dataset_id, len(zip_files))
+            vertices, faces, colors = self._collect_geometry(zip_files, target_types, transformer)
+
+            ply_path = output_dir / f"{dataset_id}.ply"
+            self._write_ply(ply_path, vertices, faces, colors, transformer)
+            logger.info("[%s] PLY 出力完了: %s", dataset_id, ply_path)
+            results.append(ply_path)
+
+        return results
+
+    def _collect_geometry(
+        self,
+        zip_files: list[Path],
+        target_types: set[FeatureType],
+        transformer: CoordinateTransformer,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """ZIP ファイル群からジオメトリを収集して結合する
+
+        Args:
+            zip_files: 処理対象の ZIP ファイルリスト
+            target_types: 処理対象の地物種別
+            transformer: 座標変換器
+
+        Returns:
+            (vertices, faces, colors) のタプル。ジオメトリがない場合は空配列。
+        """
         all_vertices: list[np.ndarray] = []
         all_faces: list[np.ndarray] = []
         all_colors: list[np.ndarray] = []
@@ -121,93 +205,22 @@ class CityGmlToPlyConverter:
 
         if not all_vertices:
             logger.warning("変換できるジオメトリがありませんでした")
-            # 空の PLY を書き出す
-            self._write_ply(
-                output_path,
+            return (
                 np.zeros((0, 3), dtype=np.float32),
                 np.zeros((0, 3), dtype=np.int32),
                 np.zeros((0, 3), dtype=np.uint8),
-                transformer,
             )
-            return output_path
 
-        vertices = np.concatenate(all_vertices, axis=0)
-        faces = np.concatenate(all_faces, axis=0)
-        colors = np.concatenate(all_colors, axis=0)
-
-        logger.info("頂点数: %d、面数: %d", len(vertices), len(faces))
-
-        self._write_ply(output_path, vertices, faces, colors, transformer)
-        logger.info("PLY 出力完了: %s", output_path)
-
-        return output_path
-
-    def _resolve_zip_files(
-        self, input_dir: Path, source: str, cfg: DictConfig
-    ) -> list[Path]:
-        """ソース種別に応じて処理対象の ZIP ファイルリストを返す
-
-        Args:
-            input_dir: 入力ディレクトリ
-            source: "file" または "plateau"
-            cfg: Hydra 設定
-
-        Returns:
-            ZIP ファイルパスのリスト
-        """
-        if source == "file":
-            # input_dir 直下の *.zip を直接使う
-            zip_files = self._pick_latest_zip_versions(sorted(input_dir.glob("*.zip")))
-            logger.info("source=file: %d 個の ZIP を検出 (%s)", len(zip_files), input_dir)
-            return zip_files
-
-        if source == "plateau":
-            return self._resolve_plateau_zips(input_dir, cfg)
-
-        raise ValueError(f"不明な source: '{source}' (file または plateau を指定してください)")
-
-    def _resolve_plateau_zips(self, input_dir: Path, cfg: DictConfig) -> list[Path]:
-        """source=plateau のときの ZIP 解決
-
-        input_dir/**/*.zip を走査してキャッシュを確認し、
-        未ダウンロードのデータセットがあれば PlateauDownloader でダウンロードする。
-
-        Args:
-            input_dir: ダウンロードキャッシュのベースディレクトリ
-            cfg: Hydra 設定
-
-        Returns:
-            ZIP ファイルパスのリスト
-        """
-        plateau_cfg = cfg.convert.plateau
-        dataset_ids: list[str] = list(plateau_cfg.dataset_ids)
-
-        # 各データセットのキャッシュを確認
-        missing: list[str] = []
-        for dataset_id in dataset_ids:
-            dataset_dir = input_dir / dataset_id
-            cached = list(dataset_dir.glob("*.zip")) if dataset_dir.exists() else []
-            if cached:
-                logger.info(
-                    "キャッシュ確認 OK [%s]: %d 個の ZIP", dataset_id, len(cached)
-                )
-            else:
-                logger.info("キャッシュなし [%s]: ダウンロードが必要", dataset_id)
-                missing.append(dataset_id)
-
-        # 未キャッシュのデータセットをダウンロード
-        if missing:
-            logger.info("%d 個のデータセットをダウンロードします", len(missing))
-            self._download_datasets(missing, input_dir, cfg)
-
-        # ダウンロード後に再度 ZIP を収集（設定された dataset_ids のディレクトリのみ）
-        all_zips: list[Path] = []
-        for dataset_id in dataset_ids:
-            all_zips.extend((input_dir / dataset_id).glob("*.zip"))
-        zip_files = self._pick_latest_zip_versions(all_zips)
-        logger.info(
-            "source=plateau: %d 個の ZIP を検出 (%d データセット)", len(zip_files), len(dataset_ids)
+        return (
+            np.concatenate(all_vertices, axis=0),
+            np.concatenate(all_faces, axis=0),
+            np.concatenate(all_colors, axis=0),
         )
+
+    def _resolve_file_zips(self, input_dir: Path) -> list[Path]:
+        """source=file のとき input_dir 直下の *.zip を返す"""
+        zip_files = self._pick_latest_zip_versions(sorted(input_dir.glob("*.zip")))
+        logger.info("source=file: %d 個の ZIP を検出 (%s)", len(zip_files), input_dir)
         return zip_files
 
     def _download_datasets(
@@ -215,17 +228,12 @@ class CityGmlToPlyConverter:
     ) -> None:
         """PlateauDownloader を使って指定データセットをダウンロードする
 
-        PlateauDownloader が期待する設定構造 (cfg.plateau, cfg.output, cfg.download)
-        を OmegaConf で動的に構築して渡す。
-
         Args:
             dataset_ids: ダウンロードするデータセット ID のリスト
             input_dir: ダウンロード先ベースディレクトリ
             cfg: Hydra 設定（convert.plateau.* を参照）
         """
         plateau_cfg = cfg.convert.plateau
-        # download 設定は plateau/default.yaml から来る想定だが、
-        # Hydra の config group override で置換された場合のフォールバックを持つ
         download_cfg = OmegaConf.select(plateau_cfg, "download", default=None)
         chunk_size = download_cfg.chunk_size if download_cfg else 8192
         timeout = download_cfg.timeout if download_cfg else 60
