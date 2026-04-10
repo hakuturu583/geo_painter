@@ -26,6 +26,23 @@ from geo_painter.plateau.downloader import _extract_version, _VERSION_RE
 
 logger = logging.getLogger(__name__)
 
+
+def _fmt_idx(n: int) -> str:
+    """タイルインデックスを辞書順ソート可能な文字列に変換する
+
+    正・ゼロ: 'p0', 'p1', 'p10' など
+    負:       'n1', 'n2' など
+
+    Examples:
+        _fmt_idx(0)  -> 'p0'
+        _fmt_idx(3)  -> 'p3'
+        _fmt_idx(-2) -> 'n2'
+    """
+    if n >= 0:
+        return f"p{n}"
+    return f"n{-n}"
+
+
 # Pillow は optional（未インストール時はテクスチャベイクを無効化）
 try:
     from PIL import Image as _PILImage
@@ -83,16 +100,32 @@ class CityGmlToPlyConverter:
         if source == "plateau":
             return self._run_plateau(input_dir, output_path, cfg, target_types, transformer)
 
-        # source == "file": 単一 PLY に統合
+        # source == "file": 単一 PLY に統合（またはタイル分割）
         zip_files = self._resolve_file_zips(input_dir)
         if not zip_files:
             raise FileNotFoundError(f"ZIPファイルが見つかりません: {input_dir}")
         logger.info("%d 個の ZIP ファイルを処理します", len(zip_files))
 
         vertices, faces, colors = self._collect_geometry(zip_files, target_types, transformer)
-        self._write_ply(output_path, vertices, faces, colors, transformer)
-        logger.info("PLY 出力完了: %s", output_path)
-        return [output_path]
+
+        tiling_enabled, tile_size, include_tiles = self._resolve_tiling_config(cfg)
+        if not tiling_enabled:
+            self._write_ply(output_path, vertices, faces, colors, transformer)
+            logger.info("PLY 出力完了: %s", output_path)
+            return [output_path]
+
+        # タイル分割出力（出力先は output_path と同ディレクトリ、stem をプレフィックスに使用）
+        output_dir = output_path.parent
+        stem = output_path.stem
+        tiles = self._split_to_tiles(vertices, faces, colors, tile_size, include_tiles)
+        logger.info("タイル数: %d", len(tiles))
+        results: list[Path] = []
+        for (tix, tiy), (tv, tf, tc) in sorted(tiles.items()):
+            ply_path = output_dir / f"{stem}_tile_{_fmt_idx(tix)}_{_fmt_idx(tiy)}.ply"
+            self._write_ply(ply_path, tv, tf, tc, transformer)
+            logger.info("タイル PLY 出力: %s", ply_path)
+            results.append(ply_path)
+        return results
 
     def _run_plateau(
         self,
@@ -136,6 +169,8 @@ class CityGmlToPlyConverter:
             logger.info("%d 個のデータセットをダウンロードします", len(missing))
             self._download_datasets(missing, input_dir, cfg)
 
+        tiling_enabled, tile_size, include_tiles = self._resolve_tiling_config(cfg)
+
         # データセットごとに PLY を生成
         results: list[Path] = []
         for dataset_id in tqdm(dataset_ids, desc="データセット処理", unit="dataset"):
@@ -149,10 +184,19 @@ class CityGmlToPlyConverter:
             logger.info("[%s] %d 個の ZIP ファイルを処理します", dataset_id, len(zip_files))
             vertices, faces, colors = self._collect_geometry(zip_files, target_types, transformer)
 
-            ply_path = output_dir / f"{dataset_id}.ply"
-            self._write_ply(ply_path, vertices, faces, colors, transformer)
-            logger.info("[%s] PLY 出力完了: %s", dataset_id, ply_path)
-            results.append(ply_path)
+            if not tiling_enabled:
+                ply_path = output_dir / f"{dataset_id}.ply"
+                self._write_ply(ply_path, vertices, faces, colors, transformer)
+                logger.info("[%s] PLY 出力完了: %s", dataset_id, ply_path)
+                results.append(ply_path)
+            else:
+                tiles = self._split_to_tiles(vertices, faces, colors, tile_size, include_tiles)
+                logger.info("[%s] タイル数: %d", dataset_id, len(tiles))
+                for (tix, tiy), (tv, tf, tc) in sorted(tiles.items()):
+                    ply_path = output_dir / f"{dataset_id}_tile_{_fmt_idx(tix)}_{_fmt_idx(tiy)}.ply"
+                    self._write_ply(ply_path, tv, tf, tc, transformer)
+                    logger.info("[%s] タイル PLY 出力: %s", dataset_id, ply_path)
+                    results.append(ply_path)
 
         return results
 
@@ -415,6 +459,91 @@ class CityGmlToPlyConverter:
             comments=comments,
         )
         ply.write(str(output_path))
+
+    @staticmethod
+    def _split_to_tiles(
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        colors: np.ndarray,
+        tile_size: float,
+        include_tiles: set[tuple[int, int]],
+    ) -> dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """ジオメトリをタイルに分割する
+
+        三角形の重心をもとにタイルインデックスを決定し、タイルごとに
+        (vertices, faces, colors) を再インデックス化して返す。
+
+        Args:
+            vertices: 頂点座標 shape=(V, 3) float32
+            faces: 面インデックス shape=(F, 3) int32
+            colors: 頂点色 shape=(V, 3) uint8
+            tile_size: タイルサイズ（メートル）
+            include_tiles: フィルタするタイルインデックスの集合。
+                           空集合の場合は全タイルを返す。
+
+        Returns:
+            {(ix, iy): (vertices, faces, colors)} の辞書。
+            ジオメトリが存在するタイルのみ含む。
+        """
+        if len(faces) == 0:
+            return {}
+
+        # 各三角形の重心 x, y を計算
+        tri_verts = vertices[faces]          # (F, 3, 3)
+        centroids = tri_verts.mean(axis=1)   # (F, 3)
+        cx = centroids[:, 0]
+        cy = centroids[:, 1]
+
+        ix_arr = np.floor(cx / tile_size).astype(np.int32)
+        iy_arr = np.floor(cy / tile_size).astype(np.int32)
+
+        # タイルキーを一括生成
+        tile_keys = list(zip(ix_arr.tolist(), iy_arr.tolist()))
+
+        # タイルごとに三角形インデックスをグループ化
+        tile_face_indices: dict[tuple[int, int], list[int]] = {}
+        for fi, key in enumerate(tile_keys):
+            if include_tiles and key not in include_tiles:
+                continue
+            tile_face_indices.setdefault(key, []).append(fi)
+
+        result: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        for key, fi_list in tile_face_indices.items():
+            fi_arr = np.array(fi_list, dtype=np.int64)
+            tile_faces_global = faces[fi_arr]              # (F_t, 3) 元の頂点インデックス
+
+            # 使用頂点を抽出して再インデックス化
+            unique_vids, inverse = np.unique(tile_faces_global, return_inverse=True)
+            tile_verts = vertices[unique_vids]             # (V_t, 3)
+            tile_colors = colors[unique_vids]              # (V_t, 3)
+            tile_faces = inverse.reshape(-1, 3).astype(np.int32)  # (F_t, 3)
+
+            result[key] = (tile_verts, tile_faces, tile_colors)
+
+        return result
+
+    def _resolve_tiling_config(
+        self, cfg: DictConfig
+    ) -> tuple[bool, float, set[tuple[int, int]]]:
+        """tiling 設定を解釈して (enabled, tile_size, include_tiles) を返す
+
+        tiling キーが設定に存在しない場合も安全にデフォルト値を返す。
+
+        Returns:
+            (enabled, tile_size, include_tiles) のタプル
+        """
+        tiling = OmegaConf.select(cfg.convert, "tiling", default=None)
+        if tiling is None:
+            return (False, 100.0, set())
+
+        enabled = bool(OmegaConf.select(tiling, "enabled", default=False))
+        tile_size = float(OmegaConf.select(tiling, "tile_size", default=100))
+        raw_tiles = OmegaConf.select(tiling, "include_tiles", default=[])
+        include_tiles: set[tuple[int, int]] = set()
+        for item in raw_tiles:
+            include_tiles.add((int(item[0]), int(item[1])))
+
+        return (enabled, tile_size, include_tiles)
 
 
 # ---------------------------------------------------------------------------

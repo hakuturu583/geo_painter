@@ -47,6 +47,13 @@ lod:
   terrain:
     - tin
 
+# タイル分割設定
+# enabled=true にするとENU座標上で tile_size x tile_size メートルのタイルに分割して出力
+tiling:
+  enabled: false        # デフォルト無効（後方互換）
+  tile_size: 100        # タイルサイズ（メートル）
+  include_tiles: []     # 空 = 全タイル生成, [[ix,iy],...] = 特定タイルのみ
+
 # source: plateau のときに使用するダウンロード設定
 # dataset_ids / file_types / download の実値は各プリセットの defaults list で
 # conf/plateau/<preset>.yaml から include される。ここはスキーマ定義のみ。
